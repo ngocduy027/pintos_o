@@ -11,6 +11,7 @@
 void
 test_main (void)
 {
+  printf("(pt-grow-pusha) end\n");
   asm volatile
     ("movl %%esp, %%eax;"        /* Save a copy of the stack pointer. */
      "andl $0xfffff000, %%esp;"  /* Move stack pointer to bottom of page. */

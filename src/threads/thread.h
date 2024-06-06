@@ -123,10 +123,7 @@ struct thread{
 	//Project 2 User program
 	struct file *fdt[64];
 	int next_fd;
-	
 	struct hash suppl_page_table;
-	void *user_esp;
-	
 	struct signal *save_signal[10];
 
 	int exit_status;

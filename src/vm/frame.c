@@ -1,170 +1,295 @@
-#include "threads/palloc.h"
-#include "threads/thread.h"
+#include <debug.h>
+#include <stdio.h>
+#include <string.h>
 #include "threads/malloc.h"
-#include "threads/palloc.h"
 #include "threads/synch.h"
+#include "threads/palloc.h"
 #include "lib/kernel/list.h"
 #include "userprog/pagedir.h"
+#include "vm/page.h"
+#include "threads/pte.h"
+#include "vm/swap.h"
+
 #include "vm/frame.h"
 
-struct list frame_table;
-static void * evict_page_from_frame(void);
-static void add_frame_table_entry(void * new_frame_ptr);
-static struct frame_table_entry * next_frame_table_entry_to_clear(void);
-static void save_evicted_page(struct frame_table_entry * next_fte_to_clear);
+struct list vm_frames;
 
-static struct lock frame_table_lock;
+/* lock to synchronize between processes on frame table */
+static struct lock vm_lock;
 
+/* lock to ensure the eviction is atomic */
+static struct lock eviction_lock;
+
+/* functionality to operate vm_frames */
+static bool add_vm_frame (void *);
+static void remove_vm_frame (void *);
+/* Get the vm_frame struct, whose frame contribute equals the given frame, from
+ * the frame list vm_frames. */
+static struct vm_frame *get_vm_frame (void *);
+
+/* functionalities needed by eviction*/
+static struct vm_frame *frame_to_evict (void); // select a frame to evict
+// save evicted frame's content for later swap in
+static bool save_evicted_frame (struct vm_frame *);
+
+
+/* init the frame table and necessary data structure */
 void
-vm_frame_table_init()
+vm_frame_init ()
 {
-  lock_init(&frame_table_lock);
-  list_init(&frame_table);
+  list_init (&vm_frames);
+  lock_init (&vm_lock);
+  lock_init (&eviction_lock);
 }
 
-void vm_free_frame(void *frame)
-{
-  struct frame_table_entry * temp_frame_table_entry;
-  struct list_elem * fte_list_elem;
-
-  /* remove the entry from the frame table and free allocated memory */
-  lock_acquire(&frame_table_lock);
-  fte_list_elem = list_head(&frame_table);
-  while((fte_list_elem = list_next(fte_list_elem)) != list_tail(&frame_table))
-  {
-    temp_frame_table_entry = list_entry(fte_list_elem, struct
-                                        frame_table_entry, elem);
-    if(temp_frame_table_entry->frame_ptr == frame)
-    {
-      list_remove(fte_list_elem);
-      /* free the memory for frame table entry struct */
-      free(temp_frame_table_entry);
-      break;
-    }
-  }
-  lock_release(&frame_table_lock);
-
-  /* free the actual frame */
-  palloc_free_page(frame);
-}
-
-
-/* allocate a page from USER_POOL and add the new entry to the frame table.
-Pintos Doc: The frames used for user pages should be obtained from the
-“user pool,” by calling palloc_get_page(PAL_USER).
-Note that this is method is call vm_get_frame since Pintos maps kernel virtual
-memory directly to physical memory, i.e. the kernel page adress is the same as
-the physical frame address. */
+/* allocate a page from USER_POOL, and add an entry to frame table */
 void *
-vm_get_frame(enum palloc_flags flags)
+vm_allocate_frame (enum palloc_flags flags)
 {
-  void *new_frame_ptr = NULL;
+  void *frame = NULL;
 
-  /* check if frame is going to be used for a user page */
+  /* trying to allocate a page from user pool */
   if (flags & PAL_USER)
-  {
-    new_frame_ptr = palloc_get_page(flags);
-  }
-
-  /* on success add frame to frame table */
-  if (new_frame_ptr != NULL)
-  {
-    add_frame_table_entry(new_frame_ptr);
-  } else
-  {
-    /* Evict a page from a frame */
-    new_frame_ptr = evict_page_from_frame();
-    /* frame is already in frame table and its contents were updated in
-    evict_page_from_frame()*/
-  }
-
-  return new_frame_ptr;
-}
-
-/* add an entry to the frame table */
-static void
-add_frame_table_entry(void * new_frame_ptr)
-{
-  struct frame_table_entry * new_frame_table_entry;
-  new_frame_table_entry = malloc(sizeof(* new_frame_table_entry));
-
-  ASSERT(new_frame_table_entry != NULL);
-
-  new_frame_table_entry->frame_ptr = new_frame_ptr;
-  new_frame_table_entry->owner_thread_tid = thread_current()->tid;
-
-  /* acquire lock to modify frame table */
-  lock_acquire(&frame_table_lock);
-  list_push_back(&frame_table, &new_frame_table_entry->elem);
-  lock_release(&frame_table_lock);
-}
-
-/* Evict a page from a frame to make room for a new page */
-static void *
-evict_page_from_frame()
-{
-  struct frame_table_entry * cleared_frame_table_entry;
-
-  lock_acquire(&frame_table_lock);
-
-  cleared_frame_table_entry = next_frame_table_entry_to_clear();
-  save_evicted_page(cleared_frame_table_entry);
-
-  cleared_frame_table_entry->owner_thread_tid = thread_current()->tid;
-  cleared_frame_table_entry->page_ptr = NULL;
-
-  lock_release(&frame_table_lock);
-
-  return cleared_frame_table_entry;
-}
-
-/* return the next frame table entry to clear */
-static struct frame_table_entry *
-next_frame_table_entry_to_clear()
-{
-  struct frame_table_entry * next_fte_to_clear = NULL;
-  struct frame_table_entry * temp_frame_table_entry;
-  struct list_elem * fte_list_elem;
-  struct thread *temp_thread;
-  /* search through frame table till a page with accessed bit is found to be 0 */
-  fte_list_elem = list_head(&frame_table);
-  while((fte_list_elem = list_next(fte_list_elem)) != list_tail (&frame_table))
-  {
-    temp_frame_table_entry = list_entry(fte_list_elem,
-      struct frame_table_entry, elem);
-    temp_thread = thread_get_by_id(temp_frame_table_entry->owner_thread_tid);
-    if(!pagedir_is_accessed(temp_thread->pagedir,
-      temp_frame_table_entry->page_ptr))
     {
-      /* found a page with access bit 0 */
-      next_fte_to_clear = temp_frame_table_entry;
-      /* maintain that the youngest frame is in the back of the list */
-      list_remove(fte_list_elem);
-      list_push_back(&frame_table, fte_list_elem);
-      break;
-    } else
-    {
-      /* also clear accessed bits while we are here */
-      pagedir_set_accessed(temp_thread->pagedir,
-        temp_frame_table_entry->page_ptr, false);
+      if (flags & PAL_ZERO)
+        frame = palloc_get_page (PAL_USER | PAL_ZERO);
+      else
+        frame = palloc_get_page (PAL_USER);
     }
-  }
 
-  if(next_fte_to_clear == NULL)
-  {
-    /* no bits had a 0 access bit, just clear the oldest one */
-    next_fte_to_clear = list_entry(list_begin(&frame_table),
-                                    struct frame_table_entry, elem);
-  }
+  /* if succeed, add to frame list
+     otherwise, should evict one page to swap, but fail the allocator
+     for now */
+  if (frame != NULL)
+    add_vm_frame (frame);
+  else
+    if ((frame = evict_frame ()) == NULL)
+      PANIC ("Evicting frame failed");
 
-  ASSERT(next_fte_to_clear != NULL);
-
-  return next_fte_to_clear;
+  return frame;
 }
 
-/* save page that is being evicted and add to the swap table */
 void
-save_evicted_page(struct frame_table_entry * next_fte_to_clear)
+vm_free_frame (void *frame)
 {
-  // TODO
+  /* remove frame table entry */
+  remove_vm_frame (frame);
+  /* free the frame */
+  palloc_free_page (frame);
+}
+
+/* set the pte attribute to PTE in corresponding entry of FRAME */
+void
+vm_frame_set_usr (void *frame, uint32_t *pte, void *upage)
+{
+  struct vm_frame *vf;
+  vf = get_vm_frame (frame);
+  if (vf != NULL)
+    {
+      vf->pte = pte;
+      vf->uva = upage;
+    }
+}
+
+/* evict a frame and save its content for later swap in */
+void *
+evict_frame ()
+{
+  bool result;
+  struct vm_frame *vf;
+  struct thread *t = thread_current ();
+
+  lock_acquire (&eviction_lock);
+
+  vf = frame_to_evict ();
+  if (vf == NULL)
+    PANIC ("No frame to evict.");
+
+  result = save_evicted_frame (vf);
+  if (!result)
+    PANIC ("can't save evicted frame");
+  
+  vf->tid = t->tid;
+  vf->pte = NULL;
+  vf->uva = NULL;
+
+  lock_release (&eviction_lock);
+
+  return vf->frame;
+}
+
+/* select a frame to evict */
+static struct vm_frame *
+frame_to_evict ()
+{
+  struct vm_frame *vf;
+  struct thread *t;
+  struct list_elem *e;
+
+  struct vm_frame *vf_class0 = NULL;
+
+  int round_count = 1;
+  bool found = false;
+  /* iterate each entry in frame table */
+  while (!found)
+    {
+      /* go through the vm frame list, try to locate the first encounter
+         of each class of the four. The goal is to find a (0,0) class,
+         if found, the break eviction selecting is ended,
+         if not, set the reference/accessed bit to 0 of each page.
+         The maxium round is 2, which is one scan after all the reference
+         bit are set to 0, if we still cannot find (0,0), we have to live
+         with the first encounter of the lowest nonempty class*/
+      e = list_head (&vm_frames);
+      while ((e = list_next (e)) != list_tail (&vm_frames))
+        {
+          vf = list_entry (e, struct vm_frame, elem);
+          t = thread_get_by_id (vf->tid);
+          bool accessed  = pagedir_is_accessed (t->pagedir, vf->uva);
+          if (!accessed)
+            {
+              vf_class0 = vf;
+              list_remove (e);
+              list_push_back (&vm_frames, e);
+              break;
+            }
+          else
+            {
+              pagedir_set_accessed (t->pagedir, vf->uva, false);
+            }
+        }
+
+      if (vf_class0 != NULL)
+        found = true;
+      else if (round_count++ == 2)
+        found = true;
+    }
+
+  return vf_class0;
+}
+ 
+/* save evicted frame's content for later swap in */
+static bool
+save_evicted_frame (struct vm_frame *vf)
+{
+  struct thread *t;
+  struct suppl_pte *spte;
+
+  /* Get corresponding thread vm_frame->tid's suppl page table */
+  t = thread_get_by_id (vf->tid);
+
+  /* Get suppl page table entry corresponding to vm_frame->uva */
+  spte = get_suppl_pte (&t->suppl_page_table, vf->uva);
+
+  /* if no suppl page table entry is found, create one and insert it
+     into suppl page table */
+  if (spte == NULL)
+    {
+      spte = calloc(1, sizeof *spte);
+      spte->uvaddr = vf->uva;
+      spte->type = SWAP;
+      if (!insert_suppl_pte (&t->suppl_page_table, spte))
+        return false;
+    }
+
+  size_t swap_slot_idx;
+  /* if the page is dirty and mmf_page write it back to file
+   * else if the page is dirty, put into swap
+   * if a page is not dirty and is not a file, then it is a stack,
+   * it needs to put into swap
+   * Here, for a file, it is not dirty, we do nothing, since we can
+   * always re-load that file when needed.*/
+  if (pagedir_is_dirty (t->pagedir, spte->uvaddr)
+      && (spte->type == MMF))
+    {
+      write_page_back_to_file_wo_lock (spte);
+    }
+  else if (pagedir_is_dirty (t->pagedir, spte->uvaddr)
+           || (spte->type != FILE))
+    {
+      swap_slot_idx = vm_swap_out (spte->uvaddr);
+      if (swap_slot_idx == SWAP_ERROR)
+        return false;
+
+      spte->type = spte->type | SWAP;
+    }
+  /* else if the page clean or read-only, do nothing */
+
+  memset (vf->frame, 0, PGSIZE);
+  /* update the swap attributes, including swap_slot_idx,
+     and swap_writable */
+  spte->swap_slot_idx = swap_slot_idx;
+  spte->swap_writable = *(vf->pte) & PTE_W;
+
+  spte->is_loaded = false;
+
+  /* unmap it from user's pagedir, free vm page/frame */
+  pagedir_clear_page (t->pagedir, spte->uvaddr);
+
+  return true;
+}
+
+/* Add an entry to frame table */
+static bool
+add_vm_frame (void *frame)
+{
+  struct vm_frame *vf;
+  vf = calloc (1, sizeof *vf);
+ 
+  if (vf == NULL)
+    return false;
+
+  vf->tid = thread_current ()->tid;
+  vf->frame = frame;
+  
+  lock_acquire (&vm_lock);
+  list_push_back (&vm_frames, &vf->elem);
+  lock_release (&vm_lock);
+
+  return true;
+  
+}
+
+/* Remove the entry from frame table and free the memory space */
+static void
+remove_vm_frame (void *frame)
+{
+  struct vm_frame *vf;
+  struct list_elem *e;
+  
+  lock_acquire (&vm_lock);
+  e = list_head (&vm_frames);
+  while ((e = list_next (e)) != list_tail (&vm_frames))
+    {
+      vf = list_entry (e, struct vm_frame, elem);
+      if (vf->frame == frame)
+        {
+          list_remove (e);
+          free (vf);
+          break;
+        }
+    }
+  lock_release (&vm_lock);
+}
+
+/* Get the vm_frame struct, whose frame contribute equals the given frame, from
+ * the frame list vm_frames. */
+static struct vm_frame *
+get_vm_frame (void *frame)
+{
+  struct vm_frame *vf;
+  struct list_elem *e;
+  
+  lock_acquire (&vm_lock);
+  e = list_head (&vm_frames);
+  while ((e = list_next (e)) != list_tail (&vm_frames))
+    {
+      vf = list_entry (e, struct vm_frame, elem);
+      if (vf->frame == frame)
+        break;
+      vf = NULL;
+    }
+  lock_release (&vm_lock);
+
+  return vf;
 }

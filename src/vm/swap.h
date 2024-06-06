@@ -1,5 +1,5 @@
-#ifndef EE468_PINTOS_PROJECT_3_SWAP_H
-#define EE468_PINTOS_PROJECT_3_SWAP_H
+#ifndef VM_SWAP_H
+#define VM_SWAP_H
 
 #define SWAP_ERROR SIZE_MAX
 
@@ -13,4 +13,4 @@ size_t vm_swap_out (const void *);
 void vm_swap_in (size_t, void *);
 
 void vm_clear_swap_slot (size_t);
-#endif //EE468_PINTOS_PROJECT_3_SWAP_H
+#endif /* vm/swap.h */

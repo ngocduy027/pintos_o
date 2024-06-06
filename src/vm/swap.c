@@ -7,7 +7,7 @@
 #include <inttypes.h>
 
 #include "vm/swap.h"
-
+          
 /* Block device that contains the swap */
 struct block *swap_device;
 
@@ -31,7 +31,7 @@ vm_swap_init ()
   if (swap_map == NULL)
     PANIC ("swap bitmap creation failed");
 
-  /* initialize all bits to be true */
+  /* initialize all bits to be true */ 
   bitmap_set_all (swap_map, true);
 }
 
@@ -43,18 +43,18 @@ size_t vm_swap_out (const void *uva)
 {
   /* find a swap slot and mark it in use */
   size_t swap_idx = bitmap_scan_and_flip (swap_map, 0, 1, true);
-
+    
   if (swap_idx == BITMAP_ERROR)
     return SWAP_ERROR;
 
   /* write the page of data to the swap slot */
   size_t counter = 0;
   while (counter < SECTORS_PER_PAGE)
-  {
-    block_write (swap_device, swap_idx * SECTORS_PER_PAGE + counter,
-                 uva + counter * BLOCK_SECTOR_SIZE);
-    counter++;
-  }
+    {
+      block_write (swap_device, swap_idx * SECTORS_PER_PAGE + counter, 
+		   uva + counter * BLOCK_SECTOR_SIZE);
+      counter++;
+    }
   return swap_idx;
 }
 
@@ -65,11 +65,11 @@ vm_swap_in (size_t swap_idx, void *uva)
   /* swap out the data from swap slot to mem page */
   size_t counter = 0;
   while (counter < SECTORS_PER_PAGE)
-  {
-    block_read (swap_device, swap_idx * SECTORS_PER_PAGE + counter,
-                uva + counter * BLOCK_SECTOR_SIZE);
-    counter++;
-  }
+    {
+      block_read (swap_device, swap_idx * SECTORS_PER_PAGE + counter,
+		  uva + counter * BLOCK_SECTOR_SIZE);
+      counter++;
+    }
   /* free the corresponding swap slot bit in bitmap */
   bitmap_flip (swap_map, swap_idx);
 }
@@ -77,7 +77,7 @@ vm_swap_in (size_t swap_idx, void *uva)
 void vm_clear_swap_slot (size_t swap_idx)
 {
   /* free the corresponding swap slot bit in bitmap */
-  bitmap_flip (swap_map, swap_idx);
+  bitmap_flip (swap_map, swap_idx);  
 }
 
 /* Returns how many pages the swap device can contain, which is rounded down */
@@ -86,3 +86,4 @@ swap_size_in_page ()
 {
   return block_size (swap_device) / SECTORS_PER_PAGE;
 }
+
